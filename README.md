@@ -1,0 +1,1 @@
+# xaueshop-mcp-server
