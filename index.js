@@ -34,7 +34,7 @@ import {
   isAddress,
 } from 'ethers';
 
-import { ROUTER_ABI, ERC20_ABI, ROUTER_STATUS, ROUTER_STATUS_CODES } from './lib/abi.js';
+import { ROUTER_ABI, ERC20_ABI, ROUTER_STATUS, ROUTER_STATUS_CODES, applySlippage, quoteForMint, quoteForRedeem } from './lib/abi.js';
 import { loadConfig, tokenSpec } from './lib/config.js';
 import { createProvider } from './lib/provider.js';
 import { createSigner } from './lib/signer.js';
@@ -286,16 +286,23 @@ server.tool(
       if (xautBal < amountRaw)  return err(new Error(`Insufficient XAUT balance (have ${formatUnits(xautBal, decimals)}, need ${amount})`));
       if (allowance < amountRaw) return err(new Error(`Insufficient XAUT allowance (have ${formatUnits(allowance, decimals)}); run xaue_approve first`));
 
+      const xaueDecimals = ctx.cfg.tokens.XAUE.decimals;
+      const q = await quoteForMint(ctx.router, amountRaw, decimals, xaueDecimals, ctx.provider);
+      const minXaueOut = q?.minXaueOut ?? 0n;
+
       const xaueBefore = await ctx.xaue.balanceOf(addr);
-      const tx = await ctx.router.mint(amountRaw);
+      const tx = await ctx.router.mint(amountRaw, minXaueOut);
       const receipt = await waitOk(tx, 'mint');
       const xaueAfter = await ctx.xaue.balanceOf(addr);
       const xaueDelta = xaueAfter - xaueBefore;
 
       return ok({
-        address: addr,
-        xautAmount: formatUnits(amountRaw, decimals),
-        xaueAmount: formatUnits(xaueDelta, ctx.cfg.tokens.XAUE.decimals),
+        address:      addr,
+        xautAmount:   formatUnits(amountRaw, decimals),
+        xaueExpected: q ? formatUnits(q.xaueExpected, xaueDecimals) : null,
+        xaueMinOut:   formatUnits(minXaueOut, xaueDecimals),
+        xaueAmount:   formatUnits(xaueDelta, xaueDecimals),
+        slippageBps:  q ? 30 : null,
         ...receipt,
       });
     } catch (e) { return err(e); }
@@ -333,7 +340,11 @@ server.tool(
       if (xaueBal < amountRaw)  return err(new Error(`Insufficient XAUE balance (have ${formatUnits(xaueBal, decimals)}, need ${amount})`));
       if (allowance < amountRaw) return err(new Error(`Insufficient XAUE allowance; run xaue_approve first`));
 
-      const tx = await ctx.router.requestRedeem(amountRaw);
+      const xautDecimals = ctx.cfg.tokens.XAUT.decimals;
+      const q = await quoteForRedeem(ctx.router, amountRaw, xautDecimals, decimals, ctx.provider);
+      const minXautOut = q?.minXautOut ?? 0n;
+
+      const tx = await ctx.router.requestRedeem(amountRaw, minXautOut);
       const rec = await tx.wait(1);
       if (!rec || rec.status !== 1) return err(new Error(`requestRedeem: transaction reverted (${tx.hash})`));
 
@@ -347,14 +358,17 @@ server.tool(
       }
 
       return ok({
-        address: addr,
-        xaueAmount:  formatUnits(amountRaw, decimals),
-        routerReqId: parsed?.routerReqId ?? null,
-        navReqId:    parsed?.navReqId ?? null,
+        address:      addr,
+        xaueAmount:   formatUnits(amountRaw, decimals),
+        xautExpected: q ? formatUnits(q.xautExpected, xautDecimals) : null,
+        xautMinOut:   formatUnits(minXautOut, xautDecimals),
+        slippageBps:  q ? 30 : null,
+        routerReqId:  parsed?.routerReqId ?? null,
+        navReqId:     parsed?.navReqId ?? null,
         ...(parsed === null && { warning: 'routerReqId not found in logs — run xaue_list_redemptions to locate your request' }),
-        txHash:      tx.hash,
-        gasUsed:     String(rec.gasUsed),
-        blockNumber: rec.blockNumber,
+        txHash:       tx.hash,
+        gasUsed:      String(rec.gasUsed),
+        blockNumber:  rec.blockNumber,
       });
     } catch (e) { return err(e); }
   },
